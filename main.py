@@ -146,7 +146,7 @@ class SmartMemoryPlugin(Star):
             self._pending_user_messages[event.unified_msg_origin] = {
                 "subject_id": subject_id,
                 "user_message": user_text,
-                "timestamp": event.timestamp or "",
+                "timestamp": getattr(event, "timestamp", None) or "",
             }
 
     @filter.on_llm_response()

@@ -10,8 +10,8 @@ class PluginConfig:
     inject_fifo_in_group: bool = True
     auto_summary_interval_minutes: int = 0
     max_memory_per_layer: int = 50
-    fleeting_ttl_rounds: int = 3           # 短暂记忆存活轮数（经历x次总结后自动移除）
-    max_concurrent_summaries: int = 2      # 最大并发总结任务数
+    fleeting_ttl_rounds: int = 4           # 短暂记忆存活轮数（经历x次总结后自动移除）
+    max_concurrent_summaries: int = 3      # 最大并发总结任务数
 
     # LLM Provider 配置
     summary_provider_id: str = ""           # 留空 = 使用 AstrBot 主对话模型
