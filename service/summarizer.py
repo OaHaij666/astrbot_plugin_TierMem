@@ -86,19 +86,29 @@ class Summarizer:
         memory_snapshot = json.dumps(state.to_dict(), ensure_ascii=False, indent=2)
 
         if self.config.summary_search_replace_prompt:
-            return self.config.summary_search_replace_prompt.format(
+            return self._safe_format(
+                self.config.summary_search_replace_prompt,
                 conversation_text=conversation_text,
                 memory_snapshot=memory_snapshot,
             )
         if self.config.summary_full_replace_prompt:
-            return self.config.summary_full_replace_prompt.format(
+            return self._safe_format(
+                self.config.summary_full_replace_prompt,
                 conversation_text=conversation_text,
                 memory_snapshot=memory_snapshot,
             )
         return self._default_prompt(conversation_text, memory_snapshot)
 
+    @staticmethod
+    def _safe_format(template: str, conversation_text: str, memory_snapshot: str) -> str:
+        """安全替换模板变量，避免 JSON 花括号与 .format() 冲突"""
+        result = template.replace("{conversation_text}", conversation_text)
+        result = result.replace("{memory_snapshot}", memory_snapshot)
+        return result
+
     def _default_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
-        return (
+        # 使用 replace 避免 JSON 花括号与 .format() 冲突
+        template = (
             "你就是这个对话中的 AI 助手（bot）。请站在你自己的视角，根据 [近期对话] 和 [你对当前用户的现有记忆]，"
             "更新你对这个用户的记忆。\n\n"
             "视角要求：\n"
@@ -127,8 +137,8 @@ class Summarizer:
             "5. 不要 hallucinate，没有明确证据不要添加记忆\n"
             "6. 如果某条现有记忆仍然准确且相关，使用 keep\n"
             "7. fleeting 层只允许 add 操作\n\n"
-            "[近期对话]\n{conversation_text}\n\n"
-            "[现有记忆]\n{memory_snapshot}\n\n"
+            "[近期对话]\n__CONVERSATION_TEXT__\n\n"
+            "[现有记忆]\n__MEMORY_SNAPSHOT__\n\n"
             "输出格式（search_replace 模式）：\n"
             "{\n"
             '  "mode": "search_replace",\n'
@@ -152,6 +162,9 @@ class Summarizer:
             "  }\n"
             "}"
         )
+        template = template.replace("__CONVERSATION_TEXT__", conversation_text)
+        template = template.replace("__MEMORY_SNAPSHOT__", memory_snapshot)
+        return template
 
     def _parse_result(self, data: dict, mode: str) -> SummaryResult:
         return SummaryResult.from_dict(data, mode)

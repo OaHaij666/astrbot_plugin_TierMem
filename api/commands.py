@@ -30,6 +30,8 @@ class CommandHandler:
             return await self._cmd_rollback(event)
         elif cmd == "status":
             return await self._cmd_status(event)
+        elif cmd == "fifo":
+            return await self._cmd_fifo(event)
         elif cmd == "help":
             return await self._cmd_help(event)
         else:
@@ -91,10 +93,25 @@ class CommandHandler:
         ]
         return event.plain_result("\n".join(lines))
 
+    async def _cmd_fifo(self, event: AstrMessageEvent) -> MessageEventResult:
+        """查看当前用户的 FIFO 对话缓存内容"""
+        subject_id = self._extract_subject_id(event)
+        turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
+        if not turns:
+            return event.plain_result(f"FIFO 为空 (subject: {subject_id})")
+        lines = [f"=== FIFO 对话缓存 ({len(turns)} 条) ===", f"subject_id: {subject_id}", ""]
+        for i, t in enumerate(turns, 1):
+            lines.append(f"--- 第 {i} 轮 ---")
+            lines.append(f"用户: {t.user_message[:100]}")
+            lines.append(f"助手: {t.assistant_message[:100]}")
+            lines.append("")
+        return event.plain_result("\n".join(lines))
+
     async def _cmd_help(self, event: AstrMessageEvent) -> MessageEventResult:
         text = (
             "/memory sum - 立即触发总结\n"
             "/memory check [layer] - 查看记忆 (layer: important/general/fleeting)\n"
+            "/memory fifo - 查看当前用户的 FIFO 对话缓存内容\n"
             "/memory clear - 清除你的所有记忆和对话缓存\n"
             "/memory rollback - 回滚到上次备份\n"
             "/memory status - 查看当前状态\n"

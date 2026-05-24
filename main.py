@@ -345,6 +345,12 @@ class SmartMemoryPlugin(Star):
         result = await self.cmd_handler.handle(event, "status", [])
         yield result
 
+    @memory_group.command("fifo")
+    async def cmd_fifo(self, event: AstrMessageEvent):
+        """查看 FIFO 对话缓存"""
+        result = await self.cmd_handler.handle(event, "fifo", [])
+        yield result
+
     @memory_group.command("clear")
     async def cmd_clear(self, event: AstrMessageEvent):
         """清除自己的记忆"""
