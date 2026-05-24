@@ -322,6 +322,64 @@ class SmartMemoryPlugin(Star):
         result = await self.cmd_handler.handle(event, "status", [])
         yield result
 
+    @memory_group.command("clear")
+    async def cmd_clear(self, event: AstrMessageEvent):
+        """清除自己的记忆"""
+        result = await self.cmd_handler.handle(event, "clear", [])
+        yield result
+
+    @memory_group.command("admin_clear")
+    async def cmd_admin_clear(self, event: AstrMessageEvent):
+        """管理员清除指定用户或所有用户的记忆"""
+        if not event.is_admin():
+            yield event.plain_result("无权使用此命令，需要管理员权限。")
+            return
+
+        text = event.message_str or ""
+        parts = text.strip().split()
+        target = parts[2] if len(parts) > 2 else None
+
+        if not target:
+            yield event.plain_result("用法: /memory admin_clear <user_id|all>")
+            return
+
+        if target == "all":
+            # 清除所有记忆和 FIFO
+            subjects = await self.mem_repo.list_all_subjects()
+            for sid in subjects:
+                await self.mem_repo.delete_by_subject(sid)
+                await self.fifo_repo.clear(sid)
+            logger.info(f"管理员 {event.get_sender_id()} 清除了所有用户记忆")
+            yield event.plain_result(f"已清除所有用户的记忆和 FIFO（共 {len(subjects)} 个 subject）。")
+        else:
+            # 清除指定用户
+            # target 可以是 user_id，需要匹配所有相关 subject_id
+            async with self.db.conn.execute(
+                "SELECT DISTINCT subject_id FROM memories WHERE subject_id LIKE ?",
+                (f"{target}#%",),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            subjects = [row["subject_id"] for row in rows]
+
+            # 也检查 fifo_buffer
+            async with self.db.conn.execute(
+                "SELECT DISTINCT subject_id FROM fifo_buffer WHERE subject_id LIKE ?",
+                (f"{target}#%",),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            subjects += [row["subject_id"] for row in rows]
+            subjects = list(set(subjects))
+
+            if not subjects:
+                yield event.plain_result(f"未找到用户 {target} 的记忆记录。")
+                return
+
+            for sid in subjects:
+                await self.mem_repo.delete_by_subject(sid)
+                await self.fifo_repo.clear(sid)
+            logger.info(f"管理员 {event.get_sender_id()} 清除了用户 {target} 的记忆")
+            yield event.plain_result(f"已清除用户 {target} 的记忆和 FIFO（共 {len(subjects)} 个上下文）。")
+
     @memory_group.command("help")
     async def cmd_help(self, event: AstrMessageEvent):
         """帮助"""

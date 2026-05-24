@@ -25,6 +25,8 @@ class CommandHandler:
             return await self._cmd_summarize(event)
         elif cmd == "check":
             return await self._cmd_check(event, args)
+        elif cmd == "clear":
+            return await self._cmd_clear(event, args)
         elif cmd == "rollback":
             return await self._cmd_rollback(event)
         elif cmd == "status":
@@ -56,6 +58,14 @@ class CommandHandler:
             lines.append(f"[{e.layer}] {e.content[:80]} (id: {e.memory_id})")
         return event.plain_result("\n".join(lines))
 
+    async def _cmd_clear(self, event: AstrMessageEvent, args: list) -> MessageEventResult:
+        """清除自己的记忆和 FIFO"""
+        subject_id = self._extract_subject_id(event)
+        await self.mem_repo.delete_by_subject(subject_id)
+        await self.fifo_repo.clear(subject_id)
+        logger.info(f"用户清除了记忆: {subject_id}")
+        return event.plain_result("已清除你的所有记忆和对话缓存。")
+
     async def _cmd_rollback(self, event: AstrMessageEvent) -> MessageEventResult:
         try:
             await self.backup_service.restore_latest()
@@ -86,8 +96,10 @@ class CommandHandler:
         text = (
             "/memory sum - 立即触发总结\n"
             "/memory check [layer] - 查看记忆 (layer: important/general/fleeting)\n"
+            "/memory clear - 清除你的所有记忆和对话缓存\n"
             "/memory rollback - 回滚到上次备份\n"
             "/memory status - 查看当前状态\n"
+            "/memory admin_clear <user_id|all> - 管理员清除指定用户或所有记忆\n"
             "/memory help - 显示此帮助"
         )
         return event.plain_result(text)
