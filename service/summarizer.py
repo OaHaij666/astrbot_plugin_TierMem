@@ -1,0 +1,162 @@
+import json
+import asyncio
+from typing import List, Tuple, Optional
+from astrbot.api import logger
+from astrbot.api.star import Context
+from core.models import ConversationTurn, MemoryState, SummaryResult, SummaryOperation, MemoryEntry
+from core.config import PluginConfig
+from core.exceptions import SummaryError, ProviderNotFoundError
+from utils.json_helper import safe_json_loads
+
+
+class Summarizer:
+    def __init__(self, config: PluginConfig, context: Context):
+        self.config = config
+        self.context = context
+
+    async def _get_summary_provider(self):
+        """获取用于总结的 LLM Provider"""
+        provider_id = self.config.summary_provider_id.strip()
+        if provider_id:
+            try:
+                provider = self.context.provider_manager.get_provider_by_id(provider_id)
+                if provider:
+                    return provider
+            except Exception as e:
+                logger.warning(f"指定的总结 Provider '{provider_id}' 获取失败: {e}，回退到主模型")
+        return self.context.get_using_provider()
+
+    async def summarize(
+        self,
+        turns: List[ConversationTurn],
+        current_state: MemoryState,
+        mode: str,
+    ) -> SummaryResult:
+        provider = await self._get_summary_provider()
+        if not provider:
+            raise ProviderNotFoundError("无法获取总结用 LLM Provider")
+
+        prompt = self._build_prompt(turns, current_state, mode)
+        system_prompt = self._build_system_prompt()
+
+        try:
+            llm_resp = await provider.text_chat(
+                prompt=prompt,
+                session_id=None,
+                contexts=[],
+                image_urls=[],
+                func_tool=None,
+                system_prompt=system_prompt,
+            )
+            raw = llm_resp.completion_text
+        except Exception as e:
+            raise SummaryError(f"LLM 调用失败: {e}")
+
+        parsed = safe_json_loads(raw)
+        if not parsed:
+            raise SummaryError(f"无法解析 LLM 返回的 JSON: {raw[:200]}")
+
+        result = self._parse_result(parsed, mode)
+
+        # 校验
+        if mode == "full_replace" and result.full_state:
+            ok, msg = self._validate_state(current_state, result.full_state)
+            if not ok:
+                raise SummaryError(f"校验失败: {msg}")
+        elif mode == "search_replace":
+            ok, msg = self._validate_operations(current_state, result.operations)
+            if not ok:
+                raise SummaryError(f"校验失败: {msg}")
+
+        return result
+
+    def _build_system_prompt(self) -> str:
+        base = (
+            "你是一个结构化记忆管理助手。你的任务是根据对话历史和现有记忆，"
+            "生成精准的记忆更新操作。你必须只输出 JSON，不要有任何额外解释。"
+        )
+        if self.config.summary_system_prompt:
+            base += f"\n\n{self.config.summary_system_prompt}"
+        return base
+
+    def _build_prompt(self, turns: List[ConversationTurn], state: MemoryState, mode: str) -> str:
+        conversation_text = "\n".join(t.to_prompt_text() for t in turns)
+        memory_snapshot = json.dumps(state.to_dict(), ensure_ascii=False, indent=2)
+
+        if mode == "search_replace":
+            return self._search_replace_prompt(conversation_text, memory_snapshot)
+        else:
+            return self._full_replace_prompt(conversation_text, memory_snapshot)
+
+    def _search_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+        return (
+            "请根据以下 [近期对话] 和 [现有记忆]，生成记忆更新操作列表。\n\n"
+            "规则：\n"
+            "1. 只能返回 JSON，不要有任何额外解释\n"
+            "2. 操作类型：add / update / delete / keep\n"
+            "3. update 和 delete 必须引用准确的 memory_id\n"
+            "4. important 层只能存放核心事实（身份、关键偏好、重要约定）\n"
+            "5. general 层存放普通事实和常规互动\n"
+            "6. fleeting 层存放临时、即将过期内容\n"
+            "7. 不要 hallucinate，没有明确证据不要添加记忆\n"
+            "8. 如果某条现有记忆仍然准确且相关，使用 keep\n\n"
+            f"[近期对话]\n{conversation_text}\n\n"
+            f"[现有记忆]\n{memory_snapshot}\n\n"
+            "输出格式：\n"
+            "{\n"
+            '  "mode": "search_replace",\n'
+            '  "summary": "总结说明",\n'
+            '  "operations": [\n'
+            '    {"action": "add", "layer": "general", "content": "...", "category": "fact", "importance": 3},\n'
+            '    {"action": "update", "memory_id": "mem-xxx", "content": "..."},\n'
+            '    {"action": "delete", "memory_id": "mem-xxx"},\n'
+            '    {"action": "keep", "memory_id": "mem-xxx"}\n'
+            "  ]\n"
+            "}"
+        )
+
+    def _full_replace_prompt(self, conversation_text: str, memory_snapshot: str) -> str:
+        return (
+            "请根据以下 [近期对话] 和 [现有记忆]，生成完整的新的三层记忆结构。\n\n"
+            "规则：\n"
+            "1. 只能返回 JSON，不要有任何额外解释\n"
+            "2. important 层只能存放核心事实\n"
+            "3. general 层存放普通事实\n"
+            "4. fleeting 层存放临时内容\n"
+            "5. 不要遗漏现有记忆中仍然准确且重要的内容\n\n"
+            f"[近期对话]\n{conversation_text}\n\n"
+            f"[现有记忆]\n{memory_snapshot}\n\n"
+            "输出格式：\n"
+            "{\n"
+            '  "mode": "full_replace",\n'
+            '  "summary": "总结说明",\n'
+            '  "full_state": {\n'
+            '    "important": [{"memory_id": "...", "content": "...", "category": "fact", "importance": 5, ...}],\n'
+            '    "general": [...],\n'
+            '    "fleeting": [...]\n'
+            "  }\n"
+            "}"
+        )
+
+    def _parse_result(self, data: dict, mode: str) -> SummaryResult:
+        return SummaryResult.from_dict(data, mode)
+
+    def _validate_state(self, old: MemoryState, new: MemoryState) -> Tuple[bool, str]:
+        # L1 记忆数量异常减少则拒绝
+        old_important = len(old.important)
+        new_important = len(new.important)
+        if new_important < old_important * 0.5 and old_important > 0:
+            return False, f"important 记忆数量异常减少: {old_important} -> {new_important}"
+        return True, "ok"
+
+    def _validate_operations(self, old: MemoryState, operations: List[SummaryOperation]) -> Tuple[bool, str]:
+        all_ids = {e.memory_id for e in old.all_entries()}
+        for op in operations:
+            if op.action in ("update", "delete", "keep"):
+                if not op.memory_id:
+                    return False, f"{op.action} 操作缺少 memory_id"
+                if op.memory_id not in all_ids:
+                    return False, f"memory_id '{op.memory_id}' 不存在"
+            if op.action == "add" and not op.content:
+                return False, "add 操作缺少 content"
+        return True, "ok"

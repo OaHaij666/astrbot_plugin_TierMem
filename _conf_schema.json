@@ -1,0 +1,81 @@
+{
+    "memory_mode": {
+        "description": "记忆共享模式。global=每个用户在不同群拥有独立记忆；shared=每个用户跨群共享同一套记忆",
+        "type": "enum",
+        "options": ["global", "shared"],
+        "default": "global"
+    },
+    "fifo_size": {
+        "description": "FIFO 缓存对话轮数阈值，达到后自动触发总结",
+        "type": "int",
+        "default": 10,
+        "min": 3,
+        "max": 50
+    },
+    "summary_mode": {
+        "description": "记忆总结更新模式。search_replace=精准修改；full_replace=全量覆盖",
+        "type": "enum",
+        "options": ["search_replace", "full_replace"],
+        "default": "search_replace"
+    },
+    "inject_fifo_in_group": {
+        "description": "群聊时是否将 FIFO 近期对话注入提示词",
+        "type": "bool",
+        "default": true
+    },
+    "auto_summary_interval_minutes": {
+        "description": "自动总结间隔分钟数（0 表示仅按 FIFO 长度触发）",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 1440
+    },
+    "max_memory_per_layer": {
+        "description": "每层记忆最大条数，超出时按重要性淘汰",
+        "type": "int",
+        "default": 50,
+        "min": 10,
+        "max": 200
+    },
+    "summary_provider_id": {
+        "description": "用于记忆总结的 LLM Provider ID。留空则使用 AstrBot 当前主对话模型",
+        "type": "text",
+        "default": ""
+    },
+    "summary_system_prompt": {
+        "description": "总结任务的额外系统提示词（可选）。会追加在默认提示词之后",
+        "type": "text",
+        "default": ""
+    },
+    "inject_memory_in_private": {
+        "description": "私聊时是否注入三层记忆到系统提示词",
+        "type": "bool",
+        "default": true
+    },
+    "inject_layers_in_group": {
+        "description": "群聊时注入哪些记忆层到系统提示词",
+        "type": "enum",
+        "options": ["important_only", "important_general", "all"],
+        "default": "important_only"
+    },
+    "enable_auto_summary": {
+        "description": "是否启用 FIFO 满自动触发总结",
+        "type": "bool",
+        "default": true
+    },
+    "enable_manual_summary": {
+        "description": "是否允许用户通过 /memory sum 命令手动触发总结",
+        "type": "bool",
+        "default": true
+    },
+    "enable_llm_tools": {
+        "description": "是否向 LLM 暴露 memory_add / memory_update / memory_delete 工具",
+        "type": "bool",
+        "default": true
+    },
+    "tool_caution_in_prompt": {
+        "description": "是否在系统提示词中附加工具使用警告，提醒 LLM 谨慎使用",
+        "type": "bool",
+        "default": true
+    }
+}
