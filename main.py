@@ -206,7 +206,12 @@ class SmartMemoryPlugin(Star):
                     # 读取 FIFO
                     turns = await self.fifo_repo.get_turns(subject_id, self.config.fifo_size)
                     if not turns:
+                        logger.info(f"FIFO 为空，跳过总结: {subject_id}")
                         return
+
+                    # 调试：打印 FIFO 内容
+                    for i, t in enumerate(turns):
+                        logger.debug(f"[FIFO][{i}] subject={subject_id} user={t.user_message[:50]} assistant={t.assistant_message[:50]}")
 
                     # 读取当前记忆
                     state = await self.mem_repo.get_state(subject_id)
