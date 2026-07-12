@@ -95,6 +95,29 @@ git clone https://github.com/OaHaij666/astrbot_plugin_TierMem.git
 
 v2 不迁移旧格式数据，检测到旧数据库结构时会重新建库。
 
+## 测试
+
+离线测试不调用模型，也不需要 API key：
+
+```bash
+python scripts/run_tests.py
+```
+
+真实集成测试会调用 DeepSeek，并覆盖“模型连接 → FIFO 对话总结 → 原子和关系写入 → FTS5 召回 → 知识图扩展”的完整流程：
+
+```bash
+# Windows PowerShell
+Copy-Item .env.example .env
+
+# Linux / macOS
+cp .env.example .env
+
+# 编辑 .env，填写 DEEPSEEK_API_KEY 和 ASTRBOT_ROOT
+python scripts/run_tests.py --live
+```
+
+`.env` 已被 Git 忽略，仓库只提供不含密钥的 `.env.example`。真实测试默认关闭，必须显式使用 `--live` 才会调用模型。
+
 ### 使用旧版
 
 需要继续使用重构前版本的用户，可以安装 `v1-legacy` 分支：

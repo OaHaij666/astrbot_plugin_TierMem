@@ -1,0 +1,312 @@
+"""Optional end-to-end tests against DeepSeek's OpenAI-compatible API.
+
+The real key is read from the repository-local .env file.  This module is skipped
+unless TIERMEM_RUN_LIVE_TESTS=1 and AstrBot is importable in the active Python
+environment, so normal unit-test runs never spend API quota.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+import unittest
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+@dataclass(frozen=True)
+class LiveSettings:
+    api_key: str
+    base_url: str
+    model: str
+    enabled: bool
+
+    @classmethod
+    def load(cls) -> "LiveSettings":
+        file_values = load_dotenv(ROOT / ".env")
+        value = lambda key, default="": os.environ.get(  # noqa: E731
+            key, file_values.get(key, default)
+        )
+        return cls(
+            api_key=value("DEEPSEEK_API_KEY"),
+            base_url=value("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+            model=value("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            enabled=value("TIERMEM_RUN_LIVE_TESTS", "0").lower()
+            in {"1", "true", "yes", "on"},
+        )
+
+
+SETTINGS = LiveSettings.load()
+ASTRBOT_AVAILABLE = importlib.util.find_spec("astrbot") is not None and (
+    importlib.util.find_spec("astrbot.api") is not None
+)
+LIVE_REASON = (
+    "set TIERMEM_RUN_LIVE_TESTS=1 and provide DEEPSEEK_API_KEY in .env; "
+    "run with AstrBot's Python environment"
+)
+
+
+class DeepSeekProvider:
+    def __init__(self, settings: LiveSettings):
+        self.settings = settings
+        self.last_usage: dict = {}
+
+    def _request(self, method: str, path: str, payload: dict | None = None):
+        body = json.dumps(payload, ensure_ascii=False).encode() if payload else None
+        request = urllib.request.Request(
+            f"{self.settings.base_url}{path}",
+            data=body,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {self.settings.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            raise AssertionError(
+                f"DeepSeek API returned HTTP {exc.code}: {detail}"
+            ) from exc
+
+    async def list_models(self) -> list[str]:
+        payload = await asyncio.to_thread(self._request, "GET", "/models")
+        return [item["id"] for item in payload.get("data", [])]
+
+    async def text_chat(self, prompt: str, system_prompt: str = "", **_kwargs):
+        payload = {
+            "model": self.settings.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": 3000,
+            "stream": False,
+        }
+        response = await asyncio.to_thread(
+            self._request, "POST", "/chat/completions", payload
+        )
+        self.last_usage = response.get("usage", {})
+        content = response["choices"][0]["message"].get("content") or ""
+        return SimpleNamespace(completion_text=content)
+
+
+class MockContext:
+    def __init__(self, provider):
+        self.provider = provider
+        self.routes = []
+
+    def get_using_provider(self):
+        return self.provider
+
+    def register_web_api(self, route, handler, methods, desc):
+        self.routes.append((route, tuple(methods), desc, handler))
+
+
+@unittest.skipUnless(
+    SETTINGS.enabled and bool(SETTINGS.api_key) and ASTRBOT_AVAILABLE,
+    LIVE_REASON,
+)
+class DeepSeekLiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_is_available(self):
+        provider = DeepSeekProvider(SETTINGS)
+        self.assertIn(SETTINGS.model, await provider.list_models())
+
+    async def test_summary_storage_and_atom_first_recall_pipeline(self):
+        sys.path.insert(0, str(ROOT))
+        import main as tiermem_main
+        from astrbot.api.web import PluginRequest, bind_request_context
+        from core.models import ConversationTurn, utc_now
+        from starlette.requests import Request
+
+        def plugin_request(method: str, path: str, payload: dict | None = None):
+            body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+            sent = False
+
+            async def receive():
+                nonlocal sent
+                if sent:
+                    return {"type": "http.disconnect"}
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": method,
+                "scheme": "http",
+                "path": path,
+                "raw_path": path.encode(),
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("127.0.0.1", 12345),
+                "server": ("testserver", 80),
+                "root_path": "",
+            }
+            return PluginRequest(Request(scope, receive))
+
+        provider = DeepSeekProvider(SETTINGS)
+        context = MockContext(provider)
+        original_data_path = tiermem_main.get_astrbot_data_path
+        temp_dir = tempfile.TemporaryDirectory()
+        plugin = None
+        try:
+            tiermem_main.get_astrbot_data_path = lambda: temp_dir.name
+            plugin = tiermem_main.TierMemPlugin(
+                context,
+                {
+                    "enable_auto_summary": False,
+                    "summary_system_prompt": (
+                        "测试数据中 user:u2 是已确认的稳定用户 ID。"
+                        "必须提取当前用户喜欢杀戮尖塔的 preference 原子，"
+                        "以及 user:u1 与 user:u2 的 friend_of 关系。"
+                    ),
+                },
+            )
+            await plugin.initialize()
+            turn = ConversationTurn(
+                turn_id="live-turn-1",
+                user_id="u1",
+                user_message=(
+                    "我喜欢玩杀戮尖塔。用户 ID 是 u2 的小王是我的朋友，"
+                    "他正在和我一起开发 TierMem。"
+                ),
+                assistant_message="记住了，你喜欢杀戮尖塔，小王是你的朋友。",
+                timestamp=utc_now(),
+                context_id="private:u1",
+            )
+            result = await plugin.summarizer.summarize(
+                [turn], [], [], "u1", "private:u1"
+            )
+
+            self.assertTrue(result.memory_operations)
+            self.assertTrue(result.relation_operations)
+            self.assertTrue(
+                any(
+                    op.category == "preference"
+                    and op.content
+                    and "杀戮尖塔" in op.content
+                    for op in result.memory_operations
+                )
+            )
+            self.assertTrue(
+                any(
+                    op.relation_type == "friend_of"
+                    and {op.source_entity_id, op.target_entity_id}
+                    == {"user:u1", "user:u2"}
+                    and op.evidence
+                    for op in result.relation_operations
+                )
+            )
+
+            await plugin._apply_summary("u1", "private:u1", turn, result, [], [])
+            preference_recall = await plugin.graph_retriever.recall(
+                "u1", "你还记得我喜欢杀戮尖塔吗？", "private:u1"
+            )
+            self.assertEqual(preference_recall.atom_search.mode, "fts5")
+            self.assertTrue(
+                any(
+                    "杀戮尖塔" in memory.content
+                    for memory in preference_recall.memories
+                )
+            )
+
+            async with plugin.db.conn.execute(
+                """SELECT m.content FROM relation_evidence re
+                JOIN memories m ON m.memory_id=re.memory_id
+                WHERE re.polarity='support' LIMIT 1"""
+            ) as cursor:
+                evidence_row = await cursor.fetchone()
+            self.assertIsNotNone(evidence_row)
+            evidence_recall = await plugin.graph_retriever.recall(
+                "u1", evidence_row["content"], "private:u1"
+            )
+            self.assertTrue(evidence_recall.evidence_edges)
+            self.assertTrue(
+                any(
+                    item.relation.relation_type == "friend_of"
+                    for item in evidence_recall.scored_relations
+                )
+            )
+
+            async with plugin.db.conn.execute(
+                """SELECT
+                (SELECT COUNT(*) FROM memories WHERE status='active') memories,
+                (SELECT COUNT(*) FROM relations WHERE status='active') relations,
+                (SELECT COUNT(*) FROM relation_evidence WHERE memory_id IS NOT NULL) evidence,
+                (SELECT COUNT(*) FROM memory_entity_mentions) mentions"""
+            ) as cursor:
+                counts = await cursor.fetchone()
+            self.assertGreaterEqual(counts["memories"], 2)
+            self.assertGreaterEqual(counts["relations"], 1)
+            self.assertGreaterEqual(counts["evidence"], 1)
+            self.assertGreaterEqual(counts["mentions"], 2)
+            self.assertEqual(len(context.routes), 5)
+            self.assertGreater(provider.last_usage.get("total_tokens", 0), 0)
+
+            stats_response = await plugin.page_stats()
+            stats = json.loads(stats_response.body)
+            self.assertGreaterEqual(stats["memories"], 2)
+            self.assertTrue(stats["fts"]["available"])
+
+            with bind_request_context(
+                plugin_request("GET", "/astrbot_TierMem/settings")
+            ):
+                settings_response = await plugin.page_settings()
+            settings = json.loads(settings_response.body)
+            self.assertEqual(settings["atom_background_limit"], 4)
+            self.assertIsInstance(settings["relation_intent_keywords"], dict)
+
+            with bind_request_context(
+                plugin_request(
+                    "POST",
+                    "/astrbot_TierMem/recall",
+                    {
+                        "user_id": "u1",
+                        "context_id": "private:u1",
+                        "message": evidence_row["content"],
+                    },
+                )
+            ):
+                recall_response = await plugin.page_recall()
+            recall_payload = json.loads(recall_response.body)
+            self.assertEqual(recall_payload["search"]["mode"], "fts5")
+            self.assertTrue(recall_payload["atoms"])
+            self.assertTrue(recall_payload["evidence_edges"])
+            self.assertTrue(recall_payload["relations"])
+        finally:
+            if plugin is not None:
+                await plugin.terminate()
+            tiermem_main.get_astrbot_data_path = original_data_path
+            temp_dir.cleanup()
+
+
+if __name__ == "__main__":
+    unittest.main()

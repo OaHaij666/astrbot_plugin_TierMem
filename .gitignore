@@ -28,6 +28,11 @@ venv/
 env/
 ENV/
 
+# Local integration-test secrets
+.env
+.env.local
+!.env.example
+
 # IDEs
 .vscode/
 .idea/

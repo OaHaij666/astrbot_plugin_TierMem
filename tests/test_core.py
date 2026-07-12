@@ -26,6 +26,12 @@ class DecayTests(unittest.TestCase):
         )
         self.assertEqual(config.relation_intent_keywords, {"friend_of": ["朋友"]})
 
+    def test_invalid_relation_keyword_json_uses_safe_defaults(self):
+        config = PluginConfig.from_astrbot_config(
+            {"relation_intent_keywords": "not valid json"}
+        )
+        self.assertIn("friend_of", config.relation_intent_keywords)
+
     def test_half_life_reduces_strength(self):
         memory = MemoryEntry(
             "m1",
@@ -101,6 +107,17 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.mode, "fts5")
         self.assertEqual([hit.memory.memory_id for hit in result.hits], ["m-game"])
         self.assertEqual(result.tokenizer, "trigram")
+
+    async def test_fts_trigger_tracks_memory_content_updates(self):
+        memory = MemoryEntry("m-update", "u1", "旧的苹果偏好")
+        await self.memories.upsert(memory)
+        memory.content = "新的香蕉偏好"
+        await self.memories.upsert(memory)
+        current = await self.memories.search_atoms("香蕉偏好", "u1")
+        stale = await self.memories.search_atoms("苹果偏好", "u1")
+        self.assertEqual(current.mode, "fts5")
+        self.assertEqual(current.hits[0].memory.memory_id, "m-update")
+        self.assertNotEqual(stale.mode, "fts5")
 
     async def test_like_and_background_atom_fallbacks(self):
         await self.memories.upsert(
@@ -302,6 +319,43 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("participates_in", result.intents)
         self.assertEqual(result.scored_relations[0].relation.relation_id, "r-project")
         self.assertIn("直接连接两个锚点", result.scored_relations[0].reasons)
+
+    async def test_graph_recall_marks_real_second_hop_paths(self):
+        async with self.db.transaction():
+            await self.graph.upsert_entity_no_commit(
+                Entity("user:u1", "user", "当前用户")
+            )
+            await self.graph.upsert_entity_no_commit(Entity("user:u2", "user", "乙"))
+            await self.graph.upsert_entity_no_commit(
+                Entity("project:p1", "project", "远端项目")
+            )
+            await self.graph.upsert_relation_no_commit(
+                Relation(
+                    "r-first",
+                    "user:u1",
+                    "friend_of",
+                    "user:u2",
+                    visibility_scope="public",
+                    owner_user_id="u1",
+                )
+            )
+            await self.graph.upsert_relation_no_commit(
+                Relation(
+                    "r-second",
+                    "user:u2",
+                    "participates_in",
+                    "project:p1",
+                    visibility_scope="public",
+                    owner_user_id="u1",
+                )
+            )
+        result = await GraphRetriever(PluginConfig(), self.graph).recall(
+            "u1", "最近有什么关系变化？", "private:u1"
+        )
+        by_id = {item.relation.relation_id: item for item in result.scored_relations}
+        self.assertEqual(by_id["r-first"].hop, 1)
+        self.assertEqual(by_id["r-second"].hop, 2)
+        self.assertIn("从种子实体扩展两跳", by_id["r-second"].reasons)
 
     async def test_atom_enters_graph_through_mentions_and_evidence(self):
         memory = MemoryEntry(
